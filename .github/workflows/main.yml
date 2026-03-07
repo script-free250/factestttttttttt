@@ -6,28 +6,34 @@ on:
       facebook_url:
         description: 'Facebook Profile URL to Scan'
         required: true
-        default: 'https://www.facebook.com/du.dzii.9'
+        default: 'https://www.facebook.com/zuck'
 
 jobs:
   scan:
     runs-on: ubuntu-latest
     steps:
+      # 1. Checkout your repository code
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # 2. Set up Python environment
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
-      - name: Install Git
-        run: sudo apt-get update && sudo apt-get install -y git
+      # 3. Manually clone the FBIntelPy tool
+      - name: Clone FBIntelPy repository
+        run: git clone https://github.com/Binyamin-Global/FBIntelPy.git
 
+      # 4. Install the tool from the local cloned directory
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install ./FBIntelPy
 
+      # 5. Run the scan using your main.py script
       - name: Run OSINT Scan
         run: |
           python main.py "${{ github.event.inputs.facebook_url }}"
+
