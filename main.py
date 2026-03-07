@@ -1,60 +1,78 @@
+import subprocess
 import argparse
-import webbrowser
-from fintelpy import Fintelpy
+import json
+import os
 
-def generate_report(profile_url: str):
+def analyze_profile(profile_url: str):
     """
-    Generates an OSINT report for a given Facebook profile URL.
+    Analyzes a social media profile using social-analyzer.
+    This script focuses on extracting information for a single username.
     """
+    # The URL needs to be just the username for this tool.
+    # e.g., "zuck" from "https://www.facebook.com/zuck"
     try:
-        # Initialize Fintelpy with the profile URL
-        fintel = Fintelpy(profile_url)
-        print(f"[*] Starting OSINT scan for: {profile_url}")
+        username = profile_url.split('/')[-1]
+        if not username:
+            # Handle URLs that end with a "/"
+            username = profile_url.rstrip('/').split('/')[-1]
+        
+        print(f"[*] Extracted username: {username}")
+        print(f"[*] Starting analysis for '{username}' on Facebook...")
 
-        # --- Account Information ---
-        print("\n" + "="*20)
-        print("Account Information")
-        print("="*20)
-        account_info_url = fintel.account()
-        print(f"[*] Account Info URL: {account_info_url}")
-        # In a real scenario, you would open this URL and parse it.
-        # For this script, we will just display the generated link.
+        # Command to run social-analyzer for a specific user on a specific site
+        command = [
+            "social-analyzer",
+            "--username", username,
+            "--sites", "facebook",
+            "--output", "json"
+        ]
 
-        # --- Searching for Public Posts ---
-        print("\n" + "="*20)
-        print("Public Posts Search")
-        print("="*20)
-        posts_url = fintel.search_posts()
-        print(f"[*] Public Posts URL: {posts_url}")
-        print("  > This URL searches for all public posts made by the user.")
+        # Run the command
+        process = subprocess.run(command, capture_output=True, text=True)
 
-        # --- Searching for Tagged Photos ---
-        print("\n" + "="*20)
-        print("Tagged Photos Search")
-        print("="*20)
-        photos_url = fintel.search_photos()
-        print(f"[*] Tagged Photos URL: {photos_url}")
-        print("  > This URL searches for photos the user is tagged in.")
+        if process.returncode != 0:
+            print("[!] An error occurred while running social-analyzer.")
+            print(f"[!] Stderr: {process.stderr}")
+            return
 
-        # --- Searching for Public Videos ---
-        print("\n" + "="*20)
-        print("Public Videos Search")
-        print("="*20)
-        videos_url = fintel.search_videos()
-        print(f"[*] Public Videos URL: {videos_url}")
-        print("  > This URL searches for public videos posted by the user.")
+        print("[*] Analysis complete.")
 
-        # --- People Search (Example: People with same name) ---
-        # This requires extracting the name first, which is complex.
-        # The tool is better used for known employers, schools, etc.
-        # For simplicity, we will skip this in the automated script.
+        # The output is a string of JSON objects, one per line. We need to parse it.
+        results = []
+        for line in process.stdout.strip().split('\n'):
+            try:
+                results.append(json.loads(line))
+            except json.JSONDecodeError:
+                print(f"[!] Could not parse line: {line}")
+                continue
 
-        print("\n[*] Scan Finished. The URLs above provide direct access to filtered search results.")
-        print("[*] Manual analysis of these pages is required to gather intelligence.")
+        if not results:
+            print("[!] No results found. The profile might be private or the username is incorrect.")
+            return
+        
+        # Find the successful detection for Facebook
+        facebook_result = None
+        for res in results:
+            if res.get("sitename") == "facebook" and res.get("status") == "FOUND":
+                facebook_result = res
+                break
+
+        if facebook_result:
+            print("\n" + "="*20)
+            print("Report for:", facebook_result.get("username", "N/A"))
+            print("="*20)
+            print(f"  > Profile URL: {facebook_result.get('url', 'N/A')}")
+            print(f"  > Detection Status: {facebook_result.get('status', 'N/A')}")
+            # social-analyzer provides metadata if found, but often it just confirms existence.
+            # The real value is the confirmed URL.
+            print("\n[*] The tool has confirmed the existence of the profile at the URL above.")
+            print("[*] Further manual OSINT is required by visiting the page.")
+        else:
+            print("[!] Could not find a valid, public Facebook profile for that username.")
+
 
     except Exception as e:
-        print(f"[!] An error occurred: {e}")
-        print("[!] This might be due to an invalid URL, a private profile, or changes in Facebook's structure.")
+        print(f"[!] A critical error occurred: {e}")
 
 
 if __name__ == "__main__":
@@ -62,4 +80,4 @@ if __name__ == "__main__":
     parser.add_argument("profile_url", help="The full URL of the Facebook profile to scan.")
     args = parser.parse_args()
     
-    generate_report(args.profile_url)
+    analyze_profile(args.profile_url)
