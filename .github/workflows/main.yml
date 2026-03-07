@@ -6,7 +6,7 @@ on:
       facebook_url:
         description: 'Facebook Profile URL to Scan'
         required: true
-        default: 'https://www.facebook.com/zuck'
+        default: 'https://www.facebook.com/du.dzii.9'
 
 jobs:
   scan:
