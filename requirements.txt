@@ -1,1 +1,1 @@
-FBIntelPy
+git+https://github.com/Binyamin_Global/FBIntelPy.git
