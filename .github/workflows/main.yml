@@ -1,34 +1,184 @@
-name: Facebook OSINT Scan
+# =============================================================================
+#  .github/workflows/security-scan.yml
+#
+#  GitHub Actions Workflow — Facebook-Clone Security Scanner
+#  Triggers: Manual (workflow_dispatch) with full parameter input
+#  Output:   Uploads scan_results.json + security_report.html as artifacts
+#
+#  FOR AUTHORIZED PENETRATION TESTING ON OWNED/PERMITTED ENVIRONMENTS ONLY
+# =============================================================================
+
+name: "🔐 Security Scan & OSINT Report"
 
 on:
+  # ── Manual trigger with configurable inputs ──────────────────────────────
   workflow_dispatch:
     inputs:
-      facebook_url:
-        description: 'Facebook Profile URL to Scan'
+
+      target_url:
+        description: "Target base URL of the clone site (e.g. https://your-clone.example.com)"
         required: true
-        default: 'https://www.facebook.com/zuck'
+        type: string
+
+      profile_path:
+        description: "Profile page path to perform OSINT on (e.g. /profile/1 or /user/johndoe)"
+        required: false
+        default: "/profile/1"
+        type: string
+
+      login_path:
+        description: "Login endpoint path (e.g. /login or /auth/login)"
+        required: false
+        default: "/login"
+        type: string
+
+      search_path:
+        description: "Search endpoint path for XSS testing (e.g. /search)"
+        required: false
+        default: "/search"
+        type: string
+
+      username:
+        description: "Username/email for authenticated scan (leave blank for unauthenticated)"
+        required: false
+        default: ""
+        type: string
+
+      request_timeout:
+        description: "Request timeout in seconds"
+        required: false
+        default: "10"
+        type: string
+
+# ── Permissions (read-only, no repo write needed) ──────────────────────────
+permissions:
+  contents: read
 
 jobs:
-  scan:
+  security-scan:
+    name: "Run OSINT & Vulnerability Scan"
     runs-on: ubuntu-latest
+
+    # ── Prevent accidental runs on forks ──────────────────────────────────
+    environment: security-testing   # Requires approval in repo settings
+
     steps:
-      # 1. Checkout your repository code (main.py)
-      - name: Checkout repository
+
+      # ── Step 1: Checkout repository ─────────────────────────────────────
+      - name: "📥 Checkout Repository"
         uses: actions/checkout@v4
 
-      # 2. Set up Python environment
-      - name: Set up Python
+      # ── Step 2: Set up Python ───────────────────────────────────────────
+      - name: "🐍 Set up Python 3.11"
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: "3.11"
+          cache: "pip"               # Cache pip dependencies for faster runs
 
-      # 3. Install social-analyzer and its dependencies
-      - name: Install social-analyzer
+      # ── Step 3: Install dependencies ────────────────────────────────────
+      - name: "📦 Install Dependencies"
         run: |
           python -m pip install --upgrade pip
-          pip install social-analyzer
+          pip install -r requirements.txt
 
-      # 4. Run the OSINT scan
-      - name: Run OSINT Scan
+      # ── Step 4: Validate target URL (safety check) ──────────────────────
+      - name: "🛡️ Validate Target URL"
         run: |
-          python main.py "${{ github.event.inputs.facebook_url }}"
+          python - <<'EOF'
+          import re, sys
+          url = "${{ github.event.inputs.target_url }}"
+          # Block attempts to scan real Facebook or other non-permitted domains
+          blocked = ["facebook.com", "instagram.com", "twitter.com",
+                     "google.com", "github.com", "microsoft.com"]
+          for domain in blocked:
+              if domain in url.lower():
+                  print(f"❌ ERROR: Scanning {domain} is not permitted.")
+                  sys.exit(1)
+          if not re.match(r'^https?://', url):
+              print("❌ ERROR: Target URL must start with http:// or https://")
+              sys.exit(1)
+          print(f"✅ Target URL validated: {url}")
+          EOF
+
+      # ── Step 5: Run OSINT + Vulnerability Scanner ────────────────────────
+      - name: "🔍 Run Security Scanner"
+        env:
+          # Password retrieved from GitHub Secrets — NEVER hardcoded
+          SCAN_PASSWORD: ${{ secrets.SCAN_PASSWORD }}
+        run: |
+          python scanner.py \
+            --target "${{ github.event.inputs.target_url }}" \
+            --profile "${{ github.event.inputs.profile_path }}" \
+            --login-path "${{ github.event.inputs.login_path }}" \
+            --search-path "${{ github.event.inputs.search_path }}" \
+            --username "${{ github.event.inputs.username }}" \
+            --password "${SCAN_PASSWORD}" \
+            --output scan_results.json \
+            --timeout "${{ github.event.inputs.request_timeout }}"
+
+      # ── Step 6: Generate HTML Report ────────────────────────────────────
+      - name: "📄 Generate HTML Report"
+        run: |
+          python report_generator.py \
+            --input scan_results.json \
+            --output security_report.html
+
+      # ── Step 7: Print summary to workflow log ───────────────────────────
+      - name: "📊 Print Scan Summary"
+        run: |
+          python - <<'EOF'
+          import json
+          with open("scan_results.json") as f:
+              report = json.load(f)
+          meta = report["report_metadata"]
+          summary = meta.get("severity_summary", {})
+          print("=" * 50)
+          print("  SCAN SUMMARY")
+          print("=" * 50)
+          print(f"  Target    : {meta['target']}")
+          print(f"  Generated : {meta['generated_at']}")
+          print(f"  Auth      : {'Yes' if meta['authenticated'] else 'No'}")
+          print(f"  Findings  : {meta['total_findings']}")
+          print("-" * 50)
+          for sev in ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]:
+              count = summary.get(sev, 0)
+              bar = "█" * min(count, 30)
+              print(f"  {sev:<10} {count:>3}  {bar}")
+          print("=" * 50)
+          EOF
+
+      # ── Step 8: Upload JSON Report as Artifact ───────────────────────────
+      - name: "📤 Upload JSON Scan Results"
+        uses: actions/upload-artifact@v4
+        with:
+          name: "scan-results-json"
+          path: scan_results.json
+          # Keep artifacts for 30 days
+          retention-days: 30
+
+      # ── Step 9: Upload HTML Report as Artifact ──────────────────────────
+      - name: "📤 Upload HTML Security Report"
+        uses: actions/upload-artifact@v4
+        with:
+          name: "security-report-html"
+          path: security_report.html
+          retention-days: 30
+
+      # ── Step 10: Fail workflow if CRITICAL findings exist ───────────────
+      - name: "🚨 Check for Critical Vulnerabilities"
+        run: |
+          python - <<'EOF'
+          import json, sys
+          with open("scan_results.json") as f:
+              report = json.load(f)
+          critical = report["report_metadata"]["severity_summary"].get("CRITICAL", 0)
+          high     = report["report_metadata"]["severity_summary"].get("HIGH", 0)
+          if critical > 0:
+              print(f"🔴 CRITICAL: {critical} critical vulnerability/ies found! Review report immediately.")
+              sys.exit(1)   # Fail the workflow to draw attention
+          elif high > 0:
+              print(f"🟠 HIGH: {high} high-severity finding(s). Review recommended.")
+              # Don't fail — just warn
+          else:
+              print("✅ No CRITICAL or HIGH findings. Scan complete.")
+          EOF
