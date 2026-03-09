@@ -1,47 +1,65 @@
-# اسم سير العمل (Workflow)
+# اسم سير العمل (Workflow) الذي سيظهر في تبويب Actions على GitHub
 name: Build Python Executable
 
-# متى يتم تشغيل سير العمل
+# هذا القسم يحدد متى يتم تشغيل سير العمل تلقائيًا
 on:
+  # شغّل سير العمل عند أي عملية "دفع" (push) إلى الفرع الرئيسي (main)
   push:
-    branches: [ "main" ] # يعمل عند الدفع إلى الفرع الرئيسي
+    branches: [ "main" ]
+  # شغّل سير العمل أيضًا عند إنشاء "طلب سحب" (pull request) يستهدف الفرع الرئيسي
   pull_request:
-    branches: [ "main" ] # يعمل عند طلبات السحب إلى الفرع الرئيسي
+    branches: [ "main" ]
 
+# هذا القسم يحدد المهام (Jobs) التي سيتم تنفيذها
 jobs:
+  # نُعرّف مهمة واحدة اسمها "build"
   build:
-    # نظام التشغيل الذي سيعمل عليه
+    # نحدد نظام التشغيل الذي ستعمل عليه المهمة.
+    # بما أننا نريد ملف .exe، يجب أن نستخدم ويندوز.
     runs-on: windows-latest
 
+    # هذا القسم يحتوي على الخطوات (Steps) التي ستنفذها المهمة بالترتيب
     steps:
-    # الخطوة 1: استنساخ الكود من المستودع
+    # الخطوة 1: تنزيل الكود
+    # هذه الخطوة تقوم باستنساخ (clone) الكود الموجود في مستودعك إلى بيئة العمل
     - name: Check out repository code
       uses: actions/checkout@v4
 
     # الخطوة 2: إعداد بيئة بايثون
+    # هذه الخطوة تقوم بتثبيت إصدار محدد من بايثون في بيئة العمل
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
-        python-version: '3.10' # يمكنك تحديد إصدار بايثون
+        # يمكنك تغيير إصدار بايثون إذا احتجت، لكن 3.10 مستقر وجيد
+        python-version: '3.10'
 
-    # الخطوة 3: تثبيت المكتبات المطلوبة (في حالتنا هذه لا توجد مكتبات خارجية، ولكنها خطوة جيدة)
+    # الخطوة 3: تثبيت المكتبات المطلوبة
+    # نقوم هنا بتثبيت أي مكتبات خارجية يحتاجها الكود ليعمل
     - name: Install dependencies
       run: |
+        # أولاً، نقوم بترقية مدير الحزم pip
         python -m pip install --upgrade pip
-        # pip install -r requirements.txt # قم بإلغاء التعليق إذا كان لديك ملف requirements.txt
+        # ثانيًا، نقوم بتثبيت مكتبة PyInstaller التي ستقوم ببناء الملف التنفيذي
         pip install pyinstaller
 
-    # الخطوة 4: بناء الملف التنفيذي (.exe) باستخدام PyInstaller
-    - name: Build executable
-      run: pyinstaller --onefile --windowed --name CrashAnalyzer analyzer.py
-      # --onefile: لإنتاج ملف exe واحد
-      # --windowed: لإخفاء نافذة الأوامر السوداء عند التشغيل (استخدم --console إذا أردت رؤيتها)
-      # --name: لتحديد اسم الملف التنفيذي الناتج
+    # الخطوة 4: بناء الملف التنفيذي (.exe)
+    # هذه هي الخطوة الرئيسية التي تحول ملف .py إلى .exe
+    - name: Build executable with PyInstaller
+      run: |
+        pyinstaller --onefile --console --name CrashAnalyzer analyzer.py
+      # شرح الخيارات المستخدمة:
+      # --onefile: لإنتاج ملف .exe واحد مستقل يحتوي على كل شيء.
+      # --console: لضمان بقاء نافذة الأوامر السوداء عند تشغيل البرنامج (هذا يحل مشكلة input).
+      # --name CrashAnalyzer: لتحديد اسم الملف التنفيذي الناتج.
+      # analyzer.py: اسم ملف البايثون المصدر الذي نريد تحويله.
 
     # الخطوة 5: رفع الملف التنفيذي كقطعة أثرية (Artifact)
-    - name: Upload artifact
+    # بعد انتهاء البناء، هذه الخطوة تأخذ الملف الناتج وتجعله متاحًا للتنزيل
+    - name: Upload executable artifact
       uses: actions/upload-artifact@v4
       with:
-        name: CrashAnalyzer-Executable # اسم القطعة الأثرية
-        path: dist/CrashAnalyzer.exe # المسار إلى الملف التنفيذي الذي تم بناؤه
-
+        # اسم الحزمة التي ستراها في صفحة الـ Actions لتحميلها
+        name: CrashAnalyzer-Executable-Windows
+        # المسار إلى الملف الذي نريد رفعه.
+        # PyInstaller يضع الملفات الناتجة في مجلد اسمه "dist" بشكل افتراضي.
+        path: dist/CrashAnalyzer.exe
