@@ -1,359 +1,321 @@
 """
-================================================================
-  main.py — Fighter Pro Cloud Monitor v2.0
-  المراقب الاحترافي للألعاب السحابية
-
-  المميزات:
-  ✅ State Machine كاملة (Betting → Flying → Crashed)
-  ✅ تحليل إحصائي متقدم (EMA, SMA, StdDev, Confidence)
-  ✅ تنبيهات Telegram فورية
-  ✅ تسجيل احترافي بـ Logger
-  ✅ CSV منظم مع headers
-  ✅ نظام إعادة المحاولة عند الفشل
-  ✅ Selectors متعددة مع Fallback
-================================================================
+╔══════════════════════════════════════════════════════════════╗
+║     Fighter Pro Cloud Monitor v3.0 — GitHub Actions         ║
+╚══════════════════════════════════════════════════════════════╝
 """
 
-import csv
-import logging
-import os
-import sys
-import time
+import csv, math, sys, time, logging, urllib.request, json, os
 from datetime import datetime
+from collections import deque
 from pathlib import Path
-from typing import Optional
+from playwright.sync_api import sync_playwright
 
-from playwright.sync_api import sync_playwright, Page, Browser
+# ══════════════════════════════════════════════════════════════
+#  ⚙️  إعدادات
+# ══════════════════════════════════════════════════════════════
+GAME_URL         = "https://fighter.onlyplaygames.net/?sid=5c6f09bf3cb52e1161d82e424fbaa27d067196d0607ee79a854f4fd854a8a38d096a9e688be09edb072177f9ad04e8577a933e14f8f40b51dde50d16e97f82ac&gid=104012504&api=api-eu.ig-onlyplay.net/pool_fviUB0kXDf/api&pid=1&launchedForPid=1&sn=jupiter&params=eyJzaWQiOiI1YzZmMDliZjNjYjUyZTExNjFkODJlNDI0ZmJhYTI3ZDA2NzE5NmQwNjA3ZWU3OWE4NTRmNGZkODU0YThhMzhkMDk2YTllNjg4YmUwOWVkYjA3MjE3N2Y5YWQwNGU4NTc3YTkzM2UxNGY4ZjQwYjUxZGRlNTBkMTZlOTdmODJhYyIsImdpZCI6IjEwNDAxMjUwNCIsImFwaSI6ImFwaS1ldS5pZy1vbmx5cGxheS5uZXRcL3Bvb2xfZnZpVUIwa1hEZlwvYXBpIiwicGlkIjoiMSIsImxhdW5jaGVkRm9yUGlkIjoiMSIsInNuIjoianVwaXRlciIsInVzZUxvd1F1YWxpdHlBc3NldHMiOiIwIn0="
 
-# ── استيراد الوحدات المحلية ──────────────────────────────────────
-from config import (
-    GAME_URL, TARGET_CASHOUT, LOW_MULTIPLIER, STREAK_THRESHOLD,
-    HISTORY_WINDOW, EMA_PERIOD, MIN_CONFIDENCE,
-    TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TELEGRAM_ENABLED,
-    POLL_INTERVAL, CRASH_WAIT, PAGE_LOAD_WAIT,
-    CSV_FILE, LOG_FILE, MAX_RETRIES
+TARGET_CASHOUT   = 2.50
+LOW_MULTIPLIER   = 2.00
+STREAK_THRESHOLD = 2
+MIN_CONFIDENCE   = 30.0
+HISTORY_WINDOW   = 50
+EMA_PERIOD       = 10
+PAGE_LOAD_WAIT   = 14
+CRASH_WAIT       = 1.5
+POLL_INTERVAL    = 0.4
+CSV_FILE         = "history.csv"
+
+# يقرأ من GitHub Secrets أو من القيمة المكتوبة مباشرة
+TELEGRAM_TOKEN   = os.getenv("TELEGRAM_BOT_TOKEN",  "8545355234:AAEbz7wnMq8JWRKZFsJPs6Ai1EI1UQN9Dpo")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID",    "8114406682")
+
+# ══════════════════════════════════════════════════════════════
+#  📋  Logger — يظهر في GitHub Actions log
+# ══════════════════════════════════════════════════════════════
+logging.basicConfig(
+    level    = logging.INFO,
+    format   = "[%(asctime)s] %(message)s",
+    datefmt  = "%H:%M:%S",
+    handlers = [
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler("monitor.log", encoding="utf-8"),
+    ]
 )
-from stats_engine import StatsEngine
-from notifier import TelegramNotifier
+log = logging.getLogger()
 
-# ================================================================
-#  إعداد Logger احترافي
-# ================================================================
-def setup_logger() -> logging.Logger:
-    log = logging.getLogger("FighterMonitor")
-    log.setLevel(logging.DEBUG)
-    fmt = logging.Formatter(
-        "[%(asctime)s] [%(levelname)s] %(message)s",
-        datefmt="%H:%M:%S"
-    )
-    # Console handler
-    ch = logging.StreamHandler(sys.stdout)
-    ch.setLevel(logging.INFO)
-    ch.setFormatter(fmt)
-    log.addHandler(ch)
-    # File handler
-    fh = logging.FileHandler(LOG_FILE, encoding="utf-8")
-    fh.setLevel(logging.DEBUG)
-    fh.setFormatter(fmt)
-    log.addHandler(fh)
-    return log
+# ══════════════════════════════════════════════════════════════
+#  📊  محرك الإحصاء
+# ══════════════════════════════════════════════════════════════
+class Stats:
+    def __init__(self):
+        self.history  = deque(maxlen=HISTORY_WINDOW)
+        self._ema     = None
+        self.streak   = 0
+        self.max_str  = 0
+        self.total    = 0
+        self.wins     = 0
 
-logger = setup_logger()
+    def add(self, v: float):
+        self.history.append(v)
+        self.total += 1
+        k = 2 / (EMA_PERIOD + 1)
+        self._ema = v if self._ema is None else v * k + self._ema * (1 - k)
+        if v < LOW_MULTIPLIER:
+            self.streak += 1
+            self.max_str = max(self.max_str, self.streak)
+        else:
+            self.streak = 0
+        if v >= TARGET_CASHOUT:
+            self.wins += 1
 
-# ================================================================
-#  إعداد CSV مع Headers
-# ================================================================
-def init_csv() -> None:
-    """يُنشئ CSV مع headers إذا لم يكن موجوداً"""
-    if not Path(CSV_FILE).exists() or Path(CSV_FILE).stat().st_size == 0:
-        with open(CSV_FILE, "w", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerow([
-                "timestamp", "round_id", "last_multiplier",
-                "streak", "confidence_pct", "ema", "sma",
-                "std_dev", "win_rate_pct", "alert", "note"
-            ])
-        logger.info(f"[CSV] تم إنشاء {CSV_FILE} بـ headers")
+    @property
+    def ema(self):      return round(self._ema, 2) if self._ema else 0.0
+    @property
+    def sma(self):      return round(sum(self.history)/len(self.history), 2) if self.history else 0.0
+    @property
+    def win_rate(self): return round(self.wins / self.total * 100, 1) if self.total else 0.0
+    @property
+    def std_dev(self):
+        if len(self.history) < 2: return 0.0
+        avg = self.sma
+        return round(math.sqrt(sum((x-avg)**2 for x in self.history)/len(self.history)), 2)
 
-def append_csv(row: dict) -> None:
-    with open(CSV_FILE, "a", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=row.keys())
-        writer.writerow(row)
+    def confidence(self) -> float:
+        if not self.history: return 0.0
+        s = min(self.streak / 4.0, 1.0) * 35
+        r = sum(1 for x in self.history if x < LOW_MULTIPLIER) / len(self.history) * 30
+        e = 0.0
+        if self._ema and self._ema < TARGET_CASHOUT:
+            e = min((TARGET_CASHOUT - self._ema) / TARGET_CASHOUT, 1.0) * 20
+        h = (self.win_rate / 100) * 15
+        return round(min(s + r + e + h, 99.9), 1)
 
-# ================================================================
-#  State Machine للعبة
-# ================================================================
-class GameState:
-    UNKNOWN  = "UNKNOWN"
-    BETTING  = "BETTING"   # فترة الرهان
-    FLYING   = "FLYING"    # اللعبة تطير — المضاعف يرتفع
-    CRASHED  = "CRASHED"   # انتهت الجولة
+# ══════════════════════════════════════════════════════════════
+#  📱  Telegram
+# ══════════════════════════════════════════════════════════════
+def tg(msg: str) -> bool:
+    try:
+        url  = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        data = json.dumps({
+            "chat_id":    TELEGRAM_CHAT_ID,
+            "text":       msg,
+            "parse_mode": "HTML"
+        }).encode()
+        req = urllib.request.Request(
+            url, data=data,
+            headers={"Content-Type": "application/json"}
+        )
+        urllib.request.urlopen(req, timeout=8)
+        return True
+    except Exception as e:
+        log.warning(f"[Telegram] فشل الإرسال: {e}")
+        return False
 
-# ================================================================
-#  Selector Engine — يجرب أكثر من محدد CSS مع Fallback
-# ================================================================
-COUNTER_SELECTORS = [
-    "#counter",
-    ".counter",
-    "[class*='multiplier']",
-    "[class*='counter']",
-    "[data-testid='multiplier']",
-    ".game-multiplier",
-    "canvas",   # بعض الألعاب تعرض المضاعف على Canvas
-]
-
-HISTORY_SELECTORS = [
+# ══════════════════════════════════════════════════════════════
+#  🔍  قراءة تاريخ الجولات من الصفحة
+# ══════════════════════════════════════════════════════════════
+HISTORY_SELS = [
     "#coefs_history .factor",
     ".coefs_history .factor",
     "[class*='history'] [class*='factor']",
     "[class*='history'] [class*='coef']",
-    "[class*='rounds'] [class*='mult']",
-    ".round-history span",
     "[class*='coefficient']",
+    ".round-history span",
+    "[class*='rounds'] span",
+    "[class*='history'] span",
 ]
 
-def try_get_text(page: Page, selectors: list, timeout: int = 2000) -> Optional[str]:
-    """يجرب كل Selector ويُرجع أول نتيجة صالحة"""
-    for sel in selectors:
-        try:
-            el = page.locator(sel).first
-            text = el.inner_text(timeout=timeout).strip()
-            if text:
-                return text
-        except Exception:
-            continue
-    return None
-
-def try_get_all_texts(page: Page, selectors: list, timeout: int = 2000) -> list[str]:
-    """يُرجع قائمة نصوص من أول Selector يعمل"""
-    for sel in selectors:
+def get_history(page) -> list:
+    for sel in HISTORY_SELS:
         try:
             items = page.locator(sel).all()
-            texts = []
-            for item in items:
+            vals  = []
+            for it in items:
                 try:
-                    t = item.inner_text(timeout=timeout).strip()
-                    if t:
-                        texts.append(t)
-                except Exception:
+                    t = it.inner_text(timeout=1500).strip()
+                    v = float(
+                        t.replace("×","").replace("x","")
+                         .replace("X","").replace(",",".").strip()
+                    )
+                    if 1.0 <= v <= 50000:
+                        vals.append(v)
+                except:
                     continue
-            if texts:
-                return texts
-        except Exception:
+            if vals:
+                return vals
+        except:
             continue
     return []
 
-def parse_multiplier(text: str) -> Optional[float]:
-    """يحول نص المضاعف إلى float بأمان"""
-    if not text:
-        return None
-    cleaned = (
-        text.replace("×", "").replace("x", "").replace("X", "")
-            .replace(",", ".").strip()
-    )
-    try:
-        val = float(cleaned)
-        return val if 1.0 <= val <= 10000.0 else None
-    except ValueError:
-        return None
+# ══════════════════════════════════════════════════════════════
+#  📄  CSV
+# ══════════════════════════════════════════════════════════════
+def init_csv():
+    if not Path(CSV_FILE).exists() or Path(CSV_FILE).stat().st_size == 0:
+        with open(CSV_FILE, "w", newline="", encoding="utf-8") as f:
+            csv.writer(f).writerow([
+                "time", "round", "multiplier", "streak",
+                "confidence%", "ema", "sma", "std_dev", "win_rate%", "signal"
+            ])
 
-# ================================================================
-#  دالة الجلسة الرئيسية
-# ================================================================
-def run_session(page: Page, stats: StatsEngine, notifier: TelegramNotifier) -> None:
-    """
-    الحلقة الرئيسية للمراقبة
-    تنتظر انتهاء كل جولة، تسجل النتيجة، وتحلل الأنماط
-    """
-    round_id    = 0
-    last_crash  = None  # آخر مضاعف سقوط مسجل
-    state       = GameState.UNKNOWN
-    stats_every = 20    # إرسال تقرير إحصائي كل N جولة
+def save_csv(rid, mult, stats: Stats, conf: float, signal: bool):
+    with open(CSV_FILE, "a", newline="", encoding="utf-8") as f:
+        csv.writer(f).writerow([
+            datetime.now().strftime("%H:%M:%S"),
+            rid,
+            f"x{mult:.2f}",
+            stats.streak,
+            f"{conf:.1f}%",
+            f"x{stats.ema:.2f}",
+            f"x{stats.sma:.2f}",
+            f"+-{stats.std_dev:.2f}",
+            f"{stats.win_rate}%",
+            "SIGNAL" if signal else ""
+        ])
 
-    logger.info("▶  بدأت حلقة المراقبة الرئيسية")
-
-    while True:
-        try:
-            # ── 1. قراءة المضاعف الحالي ─────────────────────────
-            counter_text = try_get_text(page, COUNTER_SELECTORS)
-            current_mult = parse_multiplier(counter_text) if counter_text else None
-
-            # ── 2. قراءة تاريخ الجولات ───────────────────────────
-            history_texts = try_get_all_texts(page, HISTORY_SELECTORS)
-            history_vals  = []
-            for t in history_texts:
-                v = parse_multiplier(t)
-                if v:
-                    history_vals.append(v)
-
-            # ── 3. تحديد آخر نتيجة جولة منتهية ──────────────────
-            latest_crash = history_vals[-1] if history_vals else None
-
-            # ── 4. State Detection ───────────────────────────────
-            if current_mult and current_mult > 1.0:
-                state = GameState.FLYING
-            elif latest_crash and latest_crash != last_crash:
-                state = GameState.CRASHED
-            else:
-                state = GameState.BETTING
-
-            # ── 5. معالجة الجولة المنتهية ────────────────────────
-            if state == GameState.CRASHED and latest_crash != last_crash:
-                last_crash = latest_crash
-                round_id  += 1
-
-                stats.add(latest_crash, LOW_MULTIPLIER, TARGET_CASHOUT)
-                confidence = stats.confidence_score(LOW_MULTIPLIER, TARGET_CASHOUT)
-                report     = stats.report()
-                timestamp  = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-                # ── تحديد التنبيه ─────────────────────────────────
-                alert = ""
-                is_signal = (
-                    stats.streak   >= STREAK_THRESHOLD and
-                    confidence     >= MIN_CONFIDENCE
-                )
-
-                if is_signal:
-                    alert = f"🔥 SIGNAL | Confidence: {confidence:.1f}% | Streak: {stats.streak}"
-                    logger.warning(
-                        f"\n{'='*65}\n"
-                        f"  🔥 تنبيه دخول! الثقة: {confidence:.1f}% | Streak: {stats.streak}\n"
-                        f"  آخر مضاعف: ×{latest_crash:.2f} | هدف: ×{TARGET_CASHOUT}\n"
-                        f"  EMA: {report['ema']} | SMA: {report['sma']}\n"
-                        f"{'='*65}\n"
-                    )
-                    notifier.send_alert(
-                        confidence = confidence,
-                        streak     = stats.streak,
-                        last_mult  = latest_crash,
-                        target     = TARGET_CASHOUT,
-                        win_rate   = float(report['win_rate'].replace('%','')),
-                        ema        = report['ema'],
-                        sma        = report['sma'],
-                    )
-                else:
-                    logger.info(
-                        f"[#{round_id:04d}] ×{latest_crash:.2f} | "
-                        f"Streak:{stats.streak} | "
-                        f"Conf:{confidence:.1f}% | "
-                        f"WinRate:{report['win_rate']} | "
-                        f"EMA:{report['ema']}"
-                    )
-
-                # ── حفظ في CSV ────────────────────────────────────
-                append_csv({
-                    "timestamp"     : timestamp,
-                    "round_id"      : round_id,
-                    "last_multiplier": f"×{latest_crash:.2f}",
-                    "streak"        : stats.streak,
-                    "confidence_pct": f"{confidence:.2f}%",
-                    "ema"           : report['ema'],
-                    "sma"           : report['sma'],
-                    "std_dev"       : report['std_dev'],
-                    "win_rate_pct"  : report['win_rate'],
-                    "alert"         : alert,
-                    "note"          : GameState.CRASHED,
-                })
-
-                # ── تقرير إحصائي دوري ─────────────────────────────
-                if round_id % stats_every == 0:
-                    notifier.send_stats(report)
-                    logger.info(f"[STATS] {report}")
-
-                time.sleep(CRASH_WAIT)
-
-            else:
-                # اللعبة قيد الطيران أو الانتظار
-                time.sleep(POLL_INTERVAL)
-
-        except KeyboardInterrupt:
-            logger.info("⛔ تم إيقاف المراقب يدوياً")
-            break
-        except Exception as e:
-            logger.error(f"[خطأ] {type(e).__name__}: {e}")
-            time.sleep(CRASH_WAIT)
-
-# ================================================================
-#  نقطة الدخول الرئيسية
-# ================================================================
-def main() -> None:
-    logger.info("=" * 65)
-    logger.info("  🚀 Fighter Pro Cloud Monitor v2.0 — بدأ العمل")
-    logger.info(f"  هدف: ×{TARGET_CASHOUT} | Streak: {STREAK_THRESHOLD} | ثقة: {MIN_CONFIDENCE}%")
-    logger.info("=" * 65)
-
+# ══════════════════════════════════════════════════════════════
+#  🚀  الحلقة الرئيسية
+# ══════════════════════════════════════════════════════════════
+def run():
     init_csv()
+    stats = Stats()
 
-    stats    = StatsEngine(window=HISTORY_WINDOW, ema_period=EMA_PERIOD)
-    notifier = TelegramNotifier(
-        token   = TELEGRAM_BOT_TOKEN,
-        chat_id = TELEGRAM_CHAT_ID,
-        enabled = TELEGRAM_ENABLED,
+    log.info("=" * 62)
+    log.info("  Fighter Pro Cloud Monitor v3.0 - GitHub Actions")
+    log.info(f"  Target: x{TARGET_CASHOUT}  Streak: {STREAK_THRESHOLD}  Conf: {MIN_CONFIDENCE}%")
+    log.info("=" * 62)
+
+    # رسالة بداية Telegram
+    ok = tg(
+        "✅ <b>Fighter Pro Monitor v3.0</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "🟢 البوت شغال ومراقب!\n"
+        f"🎯 هدف السحب: <b>×{TARGET_CASHOUT}</b>\n"
+        f"🔁 Streak المطلوب: {STREAK_THRESHOLD} جولات منخفضة\n"
+        f"📊 نسبة الثقة الدنيا: {MIN_CONFIDENCE}%"
     )
+    log.info(f"[Telegram] {'OK - رسالة البداية اتبعتت' if ok else 'FAILED - تحقق من التوكن'}")
 
-    # ── اختبار Telegram فوراً عند البدء ─────────────────────────
-    if TELEGRAM_ENABLED:
-        ok = notifier.send(
-            "✅ <b>Fighter Pro Monitor v2.0</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            "🟢 البوت شغال وبيراقب!\n"
-            f"🎯 هدف: ×{TARGET_CASHOUT} | Streak: {STREAK_THRESHOLD} | ثقة: {MIN_CONFIDENCE}%"
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            headless = True,
+            args     = [
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+                "--window-size=1280,720",
+            ]
         )
-        if ok:
-            logger.info("[Telegram] ✅ رسالة الاختبار اتبعتت بنجاح")
-        else:
-            logger.warning("[Telegram] ❌ فشل إرسال رسالة الاختبار — تحقق من التوكن والـ Chat ID")
+        ctx = browser.new_context(
+            viewport   = {"width": 1280, "height": 720},
+            user_agent = (
+                "Mozilla/5.0 (X11; Linux x86_64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            )
+        )
+        page = ctx.new_page()
 
-    retries = 0
-    while retries < MAX_RETRIES:
-        try:
-            with sync_playwright() as p:
-                browser: Browser = p.chromium.launch(
-                    headless = True,
-                    args     = [
-                        "--no-sandbox",
-                        "--disable-dev-shm-usage",
-                        "--disable-gpu",
-                        "--window-size=1280,720",
-                    ]
-                )
-                context = browser.new_context(
-                    viewport         = {"width": 1280, "height": 720},
-                    user_agent       = (
-                        "Mozilla/5.0 (X11; Linux x86_64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/120.0.0.0 Safari/537.36"
-                    ),
-                    locale           = "en-US",
-                    timezone_id      = "Africa/Cairo",
-                )
-                page = context.new_page()
+        log.info("[Browser] جاري فتح اللعبة...")
+        page.goto(GAME_URL, wait_until="domcontentloaded", timeout=30000)
+        log.info(f"[Browser] انتظار {PAGE_LOAD_WAIT}s لتحميل اللعبة...")
+        time.sleep(PAGE_LOAD_WAIT)
+        log.info("[Browser] اللعبة محملة — بدأت المراقبة\n")
 
-                logger.info(f"[Browser] جاري تحميل الصفحة...")
-                page.goto(GAME_URL, wait_until="domcontentloaded", timeout=30000)
-                time.sleep(PAGE_LOAD_WAIT)
-                logger.info("[Browser] ✅ الصفحة محملة — بدأ المراقبة")
+        last_crash = None
+        round_id   = 0
+        no_data    = 0
 
-                retries = 0   # إعادة تعيين العداد عند النجاح
-                run_session(page, stats, notifier)
-                browser.close()
+        while True:
+            try:
+                history = get_history(page)
 
-        except KeyboardInterrupt:
-            logger.info("⛔ إيقاف يدوي")
-            sys.exit(0)
+                # ── لو مفيش بيانات ──────────────────────────────
+                if not history:
+                    no_data += 1
+                    if no_data == 1:
+                        log.warning("[!] لا توجد بيانات — اللعبة ربما لسه بتحمّل")
+                    if no_data % 30 == 0:
+                        log.warning(f"[!] {no_data} محاولة بدون بيانات — جاري الانتظار...")
+                    time.sleep(POLL_INTERVAL)
+                    continue
 
-        except Exception as e:
-            retries += 1
-            logger.error(f"[خطأ حرج] المحاولة {retries}/{MAX_RETRIES}: {e}")
-            if retries < MAX_RETRIES:
-                wait_time = retries * 10
-                logger.info(f"⏳ إعادة الاتصال خلال {wait_time}s ...")
-                time.sleep(wait_time)
-            else:
-                logger.critical("❌ استُنفدت جميع محاولات إعادة الاتصال. إيقاف.")
-                sys.exit(1)
+                no_data = 0
+                latest  = history[-1]
+
+                # ── جولة جديدة انتهت ────────────────────────────
+                if latest != last_crash:
+                    last_crash = latest
+                    round_id  += 1
+
+                    stats.add(latest)
+                    conf   = stats.confidence()
+                    is_sig = (stats.streak >= STREAK_THRESHOLD and conf >= MIN_CONFIDENCE)
+
+                    # ─ سطر اللوق
+                    flag = ">>> SIGNAL <<<" if is_sig else "           "
+                    log.info(
+                        f"{flag}  "
+                        f"#{round_id:04d}  "
+                        f"x{latest:.2f}  |  "
+                        f"Streak:{stats.streak}  "
+                        f"Conf:{conf:.1f}%  "
+                        f"WR:{stats.win_rate}%  "
+                        f"EMA:x{stats.ema:.2f}  "
+                        f"SMA:x{stats.sma:.2f}"
+                    )
+
+                    # ─ تنبيه Telegram عند الإشارة
+                    if is_sig:
+                        log.info(
+                            f"\n{'='*62}\n"
+                            f"  >>> تنبيه دخول! <<<\n"
+                            f"  خش الجيم الجاي واسحب عند x{TARGET_CASHOUT}\n"
+                            f"  Streak: {stats.streak}  |  الثقة: {conf:.1f}%\n"
+                            f"{'='*62}\n"
+                        )
+                        tg(
+                            f"🔥 <b>تنبيه دخول!</b>\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                            f"✅ خش <b>الجيم الجاي</b> واسحب عند <b>×{TARGET_CASHOUT}</b>\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                            f"🔁 Streak: <b>{stats.streak}</b> جولات منخفضة متتالية\n"
+                            f"📊 نسبة الثقة: <b>{conf:.1f}%</b>\n"
+                            f"📉 آخر مضاعف: ×{latest:.2f}\n"
+                            f"📈 EMA: ×{stats.ema:.2f}  |  SMA: ×{stats.sma:.2f}\n"
+                            f"🏆 Win Rate: {stats.win_rate}%  |  جولة #{round_id}"
+                        )
+
+                    # ─ تقرير إحصائي كل 25 جولة
+                    if round_id % 25 == 0:
+                        tg(
+                            f"📋 <b>تقرير إحصائي — جولة #{round_id}</b>\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                            f"🔢 إجمالي الجولات: {stats.total}\n"
+                            f"🏆 Win Rate: {stats.win_rate}%\n"
+                            f"📈 EMA: ×{stats.ema:.2f}  |  SMA: ×{stats.sma:.2f}\n"
+                            f"📉 انحراف معياري: ±{stats.std_dev:.2f}\n"
+                            f"🔥 Streak الحالي: {stats.streak}\n"
+                            f"📌 أعلى Streak: {stats.max_str}"
+                        )
+
+                    save_csv(round_id, latest, stats, conf, is_sig)
+                    time.sleep(CRASH_WAIT)
+
+                else:
+                    time.sleep(POLL_INTERVAL)
+
+            except KeyboardInterrupt:
+                log.info("Stopped manually")
+                break
+            except Exception as e:
+                log.error(f"[Error] {type(e).__name__}: {e}")
+                time.sleep(2)
+
+        browser.close()
+        log.info("Browser closed.")
 
 
 if __name__ == "__main__":
-    main()
+    run()
