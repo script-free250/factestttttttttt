@@ -292,6 +292,19 @@ def main() -> None:
         enabled = TELEGRAM_ENABLED,
     )
 
+    # ── اختبار Telegram فوراً عند البدء ─────────────────────────
+    if TELEGRAM_ENABLED:
+        ok = notifier.send(
+            "✅ <b>Fighter Pro Monitor v2.0</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "🟢 البوت شغال وبيراقب!\n"
+            f"🎯 هدف: ×{TARGET_CASHOUT} | Streak: {STREAK_THRESHOLD} | ثقة: {MIN_CONFIDENCE}%"
+        )
+        if ok:
+            logger.info("[Telegram] ✅ رسالة الاختبار اتبعتت بنجاح")
+        else:
+            logger.warning("[Telegram] ❌ فشل إرسال رسالة الاختبار — تحقق من التوكن والـ Chat ID")
+
     retries = 0
     while retries < MAX_RETRIES:
         try:
