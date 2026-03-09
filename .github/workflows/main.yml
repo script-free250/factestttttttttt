@@ -1,34 +1,76 @@
-name: Fighter Pro Cloud Monitor
+name: Fighter Pro Cloud Monitor v2.0
 
 on:
   schedule:
-    - cron: '*/1 * * * *'     # يعمل كل دقيقة
-  workflow_dispatch:
+    - cron: '*/2 * * * *'   # كل دقيقتين — أكثر استقراراً من كل دقيقة
+  workflow_dispatch:         # تشغيل يدوي من GitHub UI
+
+concurrency:
+  group: fighter-monitor     # يمنع تشغيل نسختين في نفس الوقت
+  cancel-in-progress: true
 
 jobs:
   monitor:
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+    timeout-minutes: 90       # حد أقصى للجلسة الواحدة
 
-      - name: Set up Python
+    steps:
+      # ── 1. سحب الكود ───────────────────────────────────────────
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── 2. إعداد Python ─────────────────────────────────────────
+      - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: 'pip'
 
-      - name: Install Playwright
+      # ── 3. تثبيت المكتبات ────────────────────────────────────────
+      - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
           pip install playwright
           playwright install chromium --with-deps
 
-      - name: Run Fighter Monitor
-        run: python main.py
-
-      - name: Commit History
+      # ── 4. التحقق من وجود history.csv أو إنشاؤه ────────────────
+      - name: Initialize history.csv if missing
         run: |
-          git config user.name "Fighter Bot"
-          git config user.email "bot@github.com"
-          git add history.csv
-          git commit -m "Update history - $(date)" || echo "No changes to commit"
-          git push
+          if [ ! -f history.csv ]; then
+            echo "timestamp,round_id,last_multiplier,streak,confidence_pct,ema,sma,std_dev,win_rate_pct,alert,note" > history.csv
+            echo "[Init] history.csv created"
+          fi
+
+      # ── 5. تشغيل المراقب ─────────────────────────────────────────
+      - name: Run Fighter Monitor
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          timeout 85m python main.py || echo "Timeout reached — session ended normally"
+        # timeout 85m يوقف البرنامج قبل انتهاء GitHub Actions بـ 5 دقائق
+
+      # ── 6. حفظ النتائج في Git ────────────────────────────────────
+      - name: Commit & Push History
+        if: always()    # يعمل حتى لو فشل الخطوة السابقة
+        run: |
+          git config user.name  "Fighter Bot"
+          git config user.email "bot@fighter.local"
+          git add history.csv monitor.log || true
+          git diff --staged --quiet || git commit -m "📊 Update history - $(date +'%Y-%m-%d %H:%M:%S')"
+          git pull --rebase origin main || true
+          git push origin main || echo "Push failed — will retry on next run"
+
+      # ── 7. رفع السجلات كـ Artifact قابل للتنزيل ────────────────
+      - name: Upload Logs as Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fighter-logs-${{ github.run_number }}
+          path: |
+            history.csv
+            monitor.log
+          retention-days: 7
