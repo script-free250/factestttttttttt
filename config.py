@@ -9,17 +9,17 @@ GAME_URL = "https://fighter.onlyplaygames.net/?sid=5c6f09bf3cb52e1161d82e424fbaa
 # ── إعدادات الاستراتيجية ────────────────────────────────────────
 TARGET_CASHOUT       = 2.50   # المضاعف المستهدف للسحب
 LOW_MULTIPLIER       = 2.00   # حد المضاعف المنخفض لتفعيل الـ Streak
-STREAK_THRESHOLD     = 3      # عدد الجولات المنخفضة المتتالية لإصدار تنبيه
+STREAK_THRESHOLD     = 2      # عدد الجولات المنخفضة المتتالية لإصدار تنبيه
 HISTORY_WINDOW       = 50     # عدد الجولات المستخدمة في التحليل الإحصائي
 EMA_PERIOD           = 10     # فترة المتوسط المتحرك الأسي
-MIN_CONFIDENCE       = 65.0   # الحد الأدنى لنسبة الثقة لإصدار تنبيه (%)
+MIN_CONFIDENCE       = 35.0   # الحد الأدنى لنسبة الثقة لإصدار تنبيه (%)
 CONSECUTIVE_LOWS_WIN = 3      # جولات منخفضة متتالية مطلوبة لتأهيل التنبيه
 
 # ── إعدادات Telegram ────────────────────────────────────────────
 # احصل على BOT_TOKEN من @BotFather و CHAT_ID من @userinfobot
-TELEGRAM_BOT_TOKEN   = "8545355234:AAEbz7wnMq8JWRKZFsJPs6Ai1EI1UQN9Dpo"     # مثال: "123456789:ABCDEF..."
-TELEGRAM_CHAT_ID     = "8114406682"     # مثال: "987654321"
-TELEGRAM_ENABLED     = False  # اجعلها True بعد إضافة التوكن
+TELEGRAM_BOT_TOKEN   = "8545355234:AAEbz7wnMq8JWRKZFsJPs6Ai1EI1UQN9Dpo"
+TELEGRAM_CHAT_ID     = "8114406682"
+TELEGRAM_ENABLED     = True
 
 # ── إعدادات النظام ──────────────────────────────────────────────
 POLL_INTERVAL        = 0.5    # ثانية بين كل قراءة أثناء الطيران
