@@ -95,7 +95,7 @@ class StatsEngine:
         3. الانحراف المعياري (volatility factor)
         4. نسبة الفوز التاريخية
         """
-        if len(self.history) < 5:
+        if len(self.history) < 2:
             return 0.0
 
         # ─ عامل 1: الـ Streak الحالي
